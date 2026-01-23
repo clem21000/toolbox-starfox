@@ -1,0 +1,11 @@
+{
+  "warehouse": "bigquery",
+  "defaultSchema": "monitoring",
+  "assertionSchema": "monitoring_assertions",
+  "defaultDatabase": "toolbox-starfox",
+  "vars": {
+    "table_pattern": "annular-bucksaw-109316.analytics_502722504.events_*",
+    "start_date": "20260101",
+    "end_date": "20260115"
+  }
+}
