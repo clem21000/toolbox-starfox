@@ -1,6 +1,6 @@
 {
   "warehouse": "bigquery",
-  "defaultSchema": "monitoring",
+  "defaultSchema": "clem_data",
   "assertionSchema": "monitoring_assertions",
   "defaultDatabase": "toolbox-starfox",
   "vars": {
