@@ -1,8 +1,8 @@
 config {
   type: "table",                                  -- Table matérialisée (peut être "view" si tu préfères)
-  schema: "monitoring",                           -- Nom du schéma cible (à adapter)
+  schema: "clem_data",                           -- Nom du schéma cible (à adapter)
   name: "event_alerts",                           -- Nom de la table de sortie
-  tags: ["ga4", "monitoring", "alerting"],        -- Pour filtrer facilement dans ton DAG
+  tags: ["ga4", "clem_data", "alerting"],        -- Pour filtrer facilement dans ton DAG
   description: "Alertes pondérées sur les événements GA4 avec baseline adaptative et score de confiance",
 
   -- ⚙️ Paramètres dynamiques
