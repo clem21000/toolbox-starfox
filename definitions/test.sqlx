@@ -1,0 +1,9 @@
+config {
+  type: "table",
+  schema: "clem_data",
+  name: "test_connection"
+}
+
+SELECT
+  "Dataform OK ✅" AS status,
+  CURRENT_TIMESTAMP() AS run_time;
