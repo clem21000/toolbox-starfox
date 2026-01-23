@@ -1,6 +1,6 @@
 config {
   type: "table",
-  schema: "clem_data",
+  schema: "dataform_monitoring",
   name: "test_connection"
 }
 
