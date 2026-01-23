@@ -1,8 +1,9 @@
 {
   "warehouse": "bigquery",
-  "defaultSchema": "clem_data",
-  "assertionSchema": "monitoring_assertions",
   "defaultDatabase": "toolbox-starfox",
+  "defaultSchema": "clem_data",
+  "assertionSchema": "clem_data_assertions",
+  
   "vars": {
     "table_pattern": "annular-bucksaw-109316.analytics_502722504.events_*",
     "start_date": "20260101",
