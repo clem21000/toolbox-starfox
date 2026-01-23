@@ -1,69 +1,63 @@
 config {
-  type: "table",                                  -- Table matérialisée (peut être "view" si tu préfères)
-  schema: "dataform_monitoring",                           -- Nom du schéma cible (à adapter)
-  name: "event_alerts",                           -- Nom de la table de sortie
-  tags: ["ga4", "clem_data", "alerting"],        -- Pour filtrer facilement dans ton DAG
-  description: "Alertes pondérées sur les événements GA4 avec baseline adaptative et score de confiance",
-
-  -- ⚙️ Paramètres dynamiques
-  parameters: {
-    table_pattern: "annular-bucksaw-109316.analytics_502722504.events_*",
-    start_date: "20251001",
-    end_date: "20251015"
+  type: "view", // Creates a view in BigQuery. Try changing to "table" instead.
+  columns: {
+    test: "A description for the test column", // Column descriptions are pushed to BigQuery.
   }
 }
 
--- ======================
--- 🧭 Définition des périodes
--- ======================
 
-WITH params AS (
+-- ⚙️ Paramètres
+DECLARE start_date STRING DEFAULT "20260105";
+DECLARE end_date   STRING DEFAULT "20260122";
+
+-- 🧮 Durée d'analyse et Calcul dynamique de la baseline (×2, min 14j, max 90j)
+DECLARE baseline_days INT64;
+DECLARE period_length INT64;
+SET period_length = DATE_DIFF(PARSE_DATE("%Y%m%d", end_date), PARSE_DATE("%Y%m%d", start_date), DAY) + 1;
+SET baseline_days = LEAST(GREATEST(period_length * 2, 14), 90);
+
+-- 🧭 Période de comparaison dynamique
+WITH period AS (
   SELECT
-    @start_date AS start_date,
-    @end_date AS end_date
-),
-period_calc AS (
-  SELECT
-    start_date,
-    end_date,
-    DATE_DIFF(PARSE_DATE('%Y%m%d', end_date), PARSE_DATE('%Y%m%d', start_date), DAY) + 1 AS period_length
-  FROM params
-),
-baseline_calc AS (
-  SELECT
-    start_date,
-    end_date,
-    LEAST(GREATEST(period_length * 2, 14), 90) AS baseline_days
-  FROM period_calc
-),
-period AS (
-  SELECT
-    start_date,
-    end_date,
-    FORMAT_DATE('%Y%m%d', DATE_SUB(PARSE_DATE('%Y%m%d', start_date), INTERVAL baseline_days DAY)) AS baseline_start,
-    FORMAT_DATE('%Y%m%d', DATE_SUB(PARSE_DATE('%Y%m%d', start_date), INTERVAL 1 DAY)) AS baseline_end,
-    FORMAT_DATE('%Y%m%d', DATE_SUB(PARSE_DATE('%Y%m%d', start_date),
-      INTERVAL period_length DAY)) AS prev_start,
-    FORMAT_DATE('%Y%m%d', DATE_SUB(PARSE_DATE('%Y%m%d', start_date), INTERVAL 1 DAY)) AS prev_end
-  FROM baseline_calc
+    start_date AS current_start,
+    end_date   AS current_end,
+    FORMAT_DATE(
+      "%Y%m%d",
+      DATE_SUB(PARSE_DATE("%Y%m%d", start_date), INTERVAL baseline_days DAY)
+    ) AS baseline_start,
+    FORMAT_DATE("%Y%m%d", DATE_SUB(PARSE_DATE("%Y%m%d", start_date), INTERVAL 1 DAY)) AS baseline_end,
+    FORMAT_DATE(
+      "%Y%m%d",
+      DATE_SUB(PARSE_DATE("%Y%m%d", start_date),
+        INTERVAL (DATE_DIFF(PARSE_DATE("%Y%m%d", end_date), PARSE_DATE("%Y%m%d", start_date), DAY) + 1) DAY)
+    ) AS prev_start,
+    FORMAT_DATE("%Y%m%d", DATE_SUB(PARSE_DATE("%Y%m%d", start_date), INTERVAL 1 DAY)) AS prev_end
 )
 
 -- ======================
--- 📦 Données GA4
+-- 📦 Données : 1 ligne = 1 événement
 -- ======================
 , base_events AS (
-  SELECT event_name, user_pseudo_id, _TABLE_SUFFIX AS table_date
-  FROM `${@table_pattern}`
-  WHERE _TABLE_SUFFIX BETWEEN (SELECT start_date FROM params) AND (SELECT end_date FROM params)
+  SELECT
+    event_name,
+    user_pseudo_id,
+    _TABLE_SUFFIX AS table_date
+  FROM `annular-bucksaw-109316.analytics_502722504.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN (SELECT current_start FROM period) AND (SELECT current_end FROM period)
 ),
 base_events_prev AS (
-  SELECT event_name, user_pseudo_id, _TABLE_SUFFIX AS table_date
-  FROM `${@table_pattern}`
+  SELECT
+    event_name,
+    user_pseudo_id,
+    _TABLE_SUFFIX AS table_date
+  FROM `annular-bucksaw-109316.analytics_502722504.events_*`
   WHERE _TABLE_SUFFIX BETWEEN (SELECT prev_start FROM period) AND (SELECT prev_end FROM period)
 ),
 base_events_baseline AS (
-  SELECT event_name, _TABLE_SUFFIX AS table_date
-  FROM `${@table_pattern}`
+  SELECT
+    event_name,
+    _TABLE_SUFFIX AS table_date
+  FROM `annular-bucksaw-109316.analytics_502722504.events_*`
   WHERE _TABLE_SUFFIX BETWEEN (SELECT baseline_start FROM period) AND (SELECT baseline_end FROM period)
 )
 
@@ -99,25 +93,25 @@ event_stats_avg_baseline AS (
 )
 
 -- ======================
--- 📊 Assemblage final avec alertes et score
+-- 🧩 Assemblage final + pondération de confiance + double alerte
 -- ======================
 SELECT
-  -- 🗓️ Dimensions temporelles
-  CONCAT((SELECT start_date FROM params), ' - ', (SELECT end_date FROM params)) AS period,
+  -- 📅 Ajout des dimensions temporelles
+  CONCAT((SELECT current_start FROM period), ' - ', (SELECT current_end FROM period)) AS period,
   CONCAT((SELECT prev_start FROM period), ' - ', (SELECT prev_end FROM period)) AS period_prev,
   CONCAT((SELECT baseline_start FROM period), ' - ', (SELECT baseline_end FROM period)) AS period_avg,
 
-  -- 📊 Données
+  -- 📊 Données analytiques
   e.event_name,
   e.event_count,
   e_prev.event_count_prev,
   e_avg.event_count_avg_baseline,
 
-  -- 🔸 Variations (%)
+  -- 🔸 Variations
   ROUND(((e.event_count - e_prev.event_count_prev)/e_prev.event_count_prev)*100,2) AS delta_event_pct,
   ROUND(((e.event_count - e_avg.event_count_avg_baseline)/e_avg.event_count_avg_baseline)*100,2) AS delta_event_avg,
 
-  -- 🔸 Confiance
+  -- 🔸 Confiance et pondération
   CASE
     WHEN e.event_count < 100 THEN '⚪ Très faible'
     WHEN e.event_count < 1000 THEN '🟡 Moyenne'
@@ -125,11 +119,10 @@ SELECT
     ELSE '🔵 Très forte'
   END AS confidence_level,
 
-  -- 🔸 Deltas pondérés
   ROUND(((e.event_count - e_prev.event_count_prev)/e_prev.event_count_prev)*LOG10(e.event_count + 1),2) AS weighted_delta_prev,
   ROUND(((e.event_count - e_avg.event_count_avg_baseline)/e_avg.event_count_avg_baseline)*LOG10(e.event_count + 1),2) AS weighted_delta_avg,
 
-  -- 🔹 Alertes
+  -- 🔹 Alertes pondérées
   CASE
     WHEN e.event_count < 100 THEN '⚪ Données insuffisantes'
     WHEN ((e.event_count - e_prev.event_count_prev)/e_prev.event_count_prev)*LOG10(e.event_count + 1) <= -15 THEN '🔴 Critique'
@@ -146,7 +139,7 @@ SELECT
     WHEN ((e.event_count - e_avg.event_count_avg_baseline)/e_avg.event_count_avg_baseline)*LOG10(e.event_count + 1) > 5 THEN '🔵 Amélioration'
   END AS weighted_alert_avg,
 
-  -- 🔹 Synthèse globale
+  -- 🔹 Synthèse globale (plus sévère des deux)
   CASE
     WHEN e.event_count < 100 THEN '⚪ Données insuffisantes'
     WHEN (
@@ -162,17 +155,9 @@ SELECT
       AND ((e.event_count - e_avg.event_count_avg_baseline)/e_avg.event_count_avg_baseline)*LOG10(e.event_count + 1) BETWEEN -5 AND 5
     ) THEN '🟢 Stable'
     ELSE '🔵 Amélioration'
-  END AS global_alert_level,
-
-  -- 🔸 Score de confiance pondéré (0–100)
-  ROUND(
-    CASE
-      WHEN e.event_count < 100 THEN 50 * (1 + SIGN(delta_event_pct))
-      ELSE 100 - LEAST(ABS(delta_event_pct), 100) / LOG10(e.event_count + 10)
-    END, 1
-  ) AS alert_score
+  END AS global_alert_level
 
 FROM event_stats e
 LEFT JOIN event_stats_prev  e_prev USING(event_name)
 LEFT JOIN event_stats_avg_baseline e_avg USING(event_name)
-ORDER BY alert_score ASC, e.event_name;
+ORDER BY e.event_name

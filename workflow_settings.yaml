@@ -1,0 +1,4 @@
+defaultProject: toolbox-starfox
+defaultDataset: dataform_monitoring
+defaultAssertionDataset: dataform_monitoring
+dataformCoreVersion: 3.0.26

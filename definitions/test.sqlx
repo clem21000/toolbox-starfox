@@ -1,9 +1,0 @@
-config {
-  type: "table",
-  schema: "dataform_monitoring",
-  name: "test_connection"
-}
-
-SELECT
-  "Dataform OK ✅" AS status,
-  CURRENT_TIMESTAMP() AS run_time;
