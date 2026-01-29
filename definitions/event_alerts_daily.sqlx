@@ -1,0 +1,191 @@
+config {
+  type: "incremental",
+  schema: "dataform",
+  name: "event_alerts_daily",
+  uniqueKey: ["event_name", "period"]
+}
+
+WITH
+-- ⚙️ Paramètres (tu peux aussi les passer via dataform.json vars, mais ici c'est self-contained)
+params AS (
+  SELECT
+    FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)) AS start_date,
+    FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)) AS end_date
+),
+
+-- 🧮 Calculs période / baseline (×2, min 14j, max 90j)
+period AS (
+  SELECT
+    start_date,
+    end_date,
+    DATE_DIFF(PARSE_DATE("%Y%m%d", end_date), PARSE_DATE("%Y%m%d", start_date), DAY) + 1 AS period_length,
+    LEAST(
+      GREATEST(
+        (DATE_DIFF(PARSE_DATE("%Y%m%d", end_date), PARSE_DATE("%Y%m%d", start_date), DAY) + 1) * 2,
+        14
+      ),
+      90
+    ) AS baseline_days
+  FROM params
+),
+
+-- 🧭 Périodes dérivées
+period_ranges AS (
+  SELECT
+    start_date AS current_start,
+    end_date   AS current_end,
+
+    FORMAT_DATE(
+      "%Y%m%d",
+      DATE_SUB(PARSE_DATE("%Y%m%d", start_date), INTERVAL baseline_days DAY)
+    ) AS baseline_start,
+    FORMAT_DATE("%Y%m%d", DATE_SUB(PARSE_DATE("%Y%m%d", start_date), INTERVAL 1 DAY)) AS baseline_end,
+
+    FORMAT_DATE(
+      "%Y%m%d",
+      DATE_SUB(PARSE_DATE("%Y%m%d", start_date), INTERVAL period_length DAY)
+    ) AS prev_start,
+    FORMAT_DATE("%Y%m%d", DATE_SUB(PARSE_DATE("%Y%m%d", start_date), INTERVAL 1 DAY)) AS prev_end
+  FROM period
+),
+
+-- ======================
+-- 📦 Données : 1 ligne = 1 événement
+-- ======================
+base_events AS (
+  SELECT
+    event_name,
+    user_pseudo_id,
+    _TABLE_SUFFIX AS table_date
+  FROM `annular-bucksaw-109316.analytics_502722504.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN (SELECT current_start FROM period_ranges) AND (SELECT current_end FROM period_ranges)
+),
+
+base_events_prev AS (
+  SELECT
+    event_name,
+    user_pseudo_id,
+    _TABLE_SUFFIX AS table_date
+  FROM `annular-bucksaw-109316.analytics_502722504.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN (SELECT prev_start FROM period_ranges) AND (SELECT prev_end FROM period_ranges)
+),
+
+base_events_baseline AS (
+  SELECT
+    event_name,
+    _TABLE_SUFFIX AS table_date
+  FROM `annular-bucksaw-109316.analytics_502722504.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN (SELECT baseline_start FROM period_ranges) AND (SELECT baseline_end FROM period_ranges)
+),
+
+-- ======================
+-- 📈 Comptages agrégés
+-- ======================
+event_stats AS (
+  SELECT event_name, COUNT(*) AS event_count
+  FROM base_events
+  GROUP BY event_name
+),
+
+event_stats_prev AS (
+  SELECT event_name, COUNT(*) AS event_count_prev
+  FROM base_events_prev
+  GROUP BY event_name
+),
+
+event_stats_baseline AS (
+  SELECT event_name, table_date, COUNT(*) AS event_count
+  FROM base_events_baseline
+  GROUP BY event_name, table_date
+),
+
+event_stats_avg_baseline AS (
+  SELECT
+    event_name,
+    ROUND(AVG(event_count), 0) AS event_count_avg_baseline
+  FROM (
+    SELECT
+      event_name,
+      event_count,
+      PERCENT_RANK() OVER (PARTITION BY event_name ORDER BY event_count) AS rnk
+    FROM event_stats_baseline
+  )
+  WHERE rnk BETWEEN 0.1 AND 0.9
+  GROUP BY event_name
+)
+
+-- ======================
+-- 🧩 Assemblage final
+-- ======================
+SELECT
+  CONCAT((SELECT current_start FROM period_ranges), ' - ', (SELECT current_end FROM period_ranges)) AS period,
+  CONCAT((SELECT prev_start FROM period_ranges), ' - ', (SELECT prev_end FROM period_ranges)) AS period_prev,
+  CONCAT((SELECT baseline_start FROM period_ranges), ' - ', (SELECT baseline_end FROM period_ranges)) AS period_avg,
+
+  e.event_name,
+  e.event_count,
+  e_prev.event_count_prev,
+  e_avg.event_count_avg_baseline,
+
+  -- 🔸 Variations (SAFE)
+  ROUND(SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)), 100), 2) AS delta_event_pct,
+  ROUND(SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)), 100), 2) AS delta_event_avg,
+
+  CASE
+    WHEN e.event_count < 100 THEN '⚪ Très faible'
+    WHEN e.event_count < 1000 THEN '🟡 Moyenne'
+    WHEN e.event_count < 10000 THEN '🟢 Forte'
+    ELSE '🔵 Très forte'
+  END AS confidence_level,
+
+  ROUND(
+    SAFE_MULTIPLY(
+      SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)),
+      LOG10(e.event_count + 1)
+    ), 2
+  ) AS weighted_delta_prev,
+
+  ROUND(
+    SAFE_MULTIPLY(
+      SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)),
+      LOG10(e.event_count + 1)
+    ), 2
+  ) AS weighted_delta_avg,
+
+  CASE
+    WHEN e.event_count < 100 THEN '⚪ Données insuffisantes'
+    WHEN SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)), LOG10(e.event_count + 1)) <= -15 THEN '🔴 Critique'
+    WHEN SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)), LOG10(e.event_count + 1)) <= -5 THEN '🟠 Attention'
+    WHEN SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)), LOG10(e.event_count + 1)) BETWEEN -5 AND 5 THEN '🟢 Stable'
+    ELSE '🔵 Amélioration'
+  END AS weighted_alert_prev,
+
+  CASE
+    WHEN e.event_count < 100 THEN '⚪ Données insuffisantes'
+    WHEN SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)), LOG10(e.event_count + 1)) <= -15 THEN '🔴 Critique'
+    WHEN SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)), LOG10(e.event_count + 1)) <= -5 THEN '🟠 Attention'
+    WHEN SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)), LOG10(e.event_count + 1)) BETWEEN -5 AND 5 THEN '🟢 Stable'
+    ELSE '🔵 Amélioration'
+  END AS weighted_alert_avg,
+
+  CASE
+    WHEN e.event_count < 100 THEN '⚪ Données insuffisantes'
+    WHEN (
+      SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)), LOG10(e.event_count + 1)) <= -15
+      OR SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)), LOG10(e.event_count + 1)) <= -15
+    ) THEN '🔴 Critique'
+    WHEN (
+      SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)), LOG10(e.event_count + 1)) <= -5
+      OR SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)), LOG10(e.event_count + 1)) <= -5
+    ) THEN '🟠 Attention'
+    WHEN (
+      SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_prev.event_count_prev, NULLIF(e_prev.event_count_prev, 0)), LOG10(e.event_count + 1)) BETWEEN -5 AND 5
+      AND SAFE_MULTIPLY(SAFE_DIVIDE(e.event_count - e_avg.event_count_avg_baseline, NULLIF(e_avg.event_count_avg_baseline, 0)), LOG10(e.event_count + 1)) BETWEEN -5 AND 5
+    ) THEN '🟢 Stable'
+    ELSE '🔵 Amélioration'
+  END AS global_alert_level
+
+FROM event_stats e
+LEFT JOIN event_stats_prev e_prev USING(event_name)
+LEFT JOIN event_stats_avg_baseline e_avg USING(event_name)
+ORDER BY e.event_name
