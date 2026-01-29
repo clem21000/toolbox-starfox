@@ -1,12 +1,5 @@
-<<<<<<< HEAD
-defaultProject: toolbox-starfox
-defaultDataset: dataform_monitoring
-defaultAssertionDataset: dataform_monitoring
-dataformCoreVersion: 3.0.26
-=======
 dataformCoreVersion: 3.0.43
 defaultProject: toolbox-starfox
 defaultLocation: EU
 defaultDataset: dataform
 defaultAssertionDataset: dataform_assertions
->>>>>>> refs/heads/main
