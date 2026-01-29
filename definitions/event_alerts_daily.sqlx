@@ -1,7 +1,7 @@
 config {
   type: "incremental",
   schema: "dataform",
-  name: "event_alerts_daily",
+  name: "event_alerts_daily_2",
   uniqueKey: ["event_name", "period"]
 }
 
